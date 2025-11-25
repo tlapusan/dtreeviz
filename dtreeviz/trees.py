@@ -561,37 +561,40 @@ class DTreeVizAPI:
             if depth_range_to_display is not None:
                 if node.level not in range(depth_range_to_display[0], depth_range_to_display[1] + 1):
                     continue
+            node_to_display = True
             if fancy:
                 if self.shadow_tree.is_classifier():
-                    _class_split_viz(node, X_train, y_train,
-                                     filename=os.path.join(tmp, f"node{node.id}_{os.getpid()}.svg"),
-                                     precision=precision,
-                                     colors={**color_map, **colors},
-                                     histtype=histtype,
-                                     node_heights=node_heights,
-                                     X=x,
-                                     ticks_fontsize=ticks_fontsize,
-                                     label_fontsize=label_fontsize,
-                                     fontname=fontname,
-                                     highlight_node=node.id in highlight_path)
+                    node_to_display = _class_split_viz(node, X_train, y_train,
+                                         filename=os.path.join(tmp, f"node{node.id}_{os.getpid()}.svg"),
+                                         precision=precision,
+                                         colors={**color_map, **colors},
+                                         histtype=histtype,
+                                         node_heights=node_heights,
+                                         X=x,
+                                         ticks_fontsize=ticks_fontsize,
+                                         label_fontsize=label_fontsize,
+                                         fontname=fontname,
+                                         highlight_node=node.id in highlight_path)
                 else:
-                    _regr_split_viz(node, X_train, y_train,
-                                    filename=os.path.join(tmp, f"node{node.id}_{os.getpid()}.svg"),
-                                    target_name=self.shadow_tree.target_name,
-                                    y_range=y_range,
-                                    X=x,
-                                    ticks_fontsize=ticks_fontsize,
-                                    label_fontsize=label_fontsize,
-                                    fontname=fontname,
-                                    highlight_node=node.id in highlight_path,
-                                    colors=colors)
+                    node_to_display = _regr_split_viz(node, X_train, y_train,
+                                        filename=os.path.join(tmp, f"node{node.id}_{os.getpid()}.svg"),
+                                        target_name=self.shadow_tree.target_name,
+                                        y_range=y_range,
+                                        X=x,
+                                        ticks_fontsize=ticks_fontsize,
+                                        label_fontsize=label_fontsize,
+                                        fontname=fontname,
+                                        highlight_node=node.id in highlight_path,
+                                        colors=colors)
 
             nname = node_name(node)
             if not node.is_categorical_split():
                 gr_node = split_node(node.feature_name(), nname, split=myround(node.split(), precision))
             else:
                 gr_node = split_node(node.feature_name(), nname, split=node.split()[0])
-            internal.append(gr_node)
+
+            if node_to_display:
+                internal.append(gr_node)
 
         leaves = []
         for node in get_leaves():
@@ -599,15 +602,15 @@ class DTreeVizAPI:
                 if node.level not in range(depth_range_to_display[0], depth_range_to_display[1] + 1):
                     continue
             if self.shadow_tree.is_classifier():
-                _class_leaf_viz(node, colors=color_values,
+                if _class_leaf_viz(node, colors=color_values,
                                 filename=os.path.join(tmp, f"leaf{node.id}_{os.getpid()}.svg"),
                                 graph_colors=colors,
                                 fontname=fontname,
-                                leaftype=leaftype)
-                leaves.append(class_leaf_node(node))
+                                leaftype=leaftype):
+                    leaves.append(class_leaf_node(node))
             else:
                 # for now, always gen leaf
-                _regr_leaf_viz(node,
+                if _regr_leaf_viz(node,
                                y_train,
                                target_name=self.shadow_tree.target_name,
                                filename=os.path.join(tmp, f"leaf{node.id}_{os.getpid()}.svg"),
@@ -616,8 +619,8 @@ class DTreeVizAPI:
                                ticks_fontsize=ticks_fontsize,
                                label_fontsize=label_fontsize,
                                fontname=fontname,
-                               colors=colors)
-                leaves.append(regr_leaf_node(node))
+                               colors=colors):
+                    leaves.append(regr_leaf_node(node))
 
         if show_just_path:
             show_root_edge_labels = False
@@ -1137,6 +1140,14 @@ def _class_split_viz(node: ShadowDecTreeNode,
 
     # Get X, y data for all samples associated with this node.
     X_feature = X_train[:, node.feature()]
+
+
+    if len(node.samples()) == 0:
+        if filename is not None:
+            plt.savefig(filename, bbox_inches='tight', pad_inches=0)
+            plt.close()
+        return False
+
     X_node_feature, y_train = X_feature[node.samples()], y_train[node.samples()]
 
     n_classes = node.shadow_tree.nclasses()
@@ -1235,6 +1246,7 @@ def _class_split_viz(node: ShadowDecTreeNode,
     if filename is not None:
         plt.savefig(filename, bbox_inches='tight', pad_inches=0)
         plt.close()
+    return True
 
 
 def _class_leaf_viz(node: ShadowDecTreeNode,
@@ -1259,13 +1271,15 @@ def _class_leaf_viz(node: ShadowDecTreeNode,
     # when using another dataset than the training dataset, some leaves could have 0 samples.
     # Trying to make a pie chart will raise some deprecation
     if sum(counts) == 0:
-        return
+        return False
     if leaftype == 'pie':
         _draw_piechart(counts, size=size, colors=colors, filename=filename, label=f"n={nsamples}\n{prediction}",
                       graph_colors=graph_colors, fontname=fontname)
+        return True
     elif leaftype == 'barh':
         _draw_barh_chart(counts, size=size, colors=colors, filename=filename, label=f"n={nsamples}\n{prediction}",
                       graph_colors=graph_colors, fontname=fontname)
+        return True
     else:
         raise ValueError(f'Undefined leaftype = {leaftype}')
 
@@ -1286,6 +1300,12 @@ def _regr_split_viz(node: ShadowDecTreeNode,
 
     figsize = (2.5, 1.1)
     fig, ax = plt.subplots(1, 1, figsize=figsize)
+
+    if len(node.samples()) == 0:
+        if filename is not None:
+            plt.savefig(filename, bbox_inches='tight', pad_inches=0)
+            plt.close()
+        return False
 
     feature_name = node.feature_name()
     _format_axes(ax, feature_name, target_name if node == node.shadow_tree.root else None, colors, fontsize=label_fontsize, fontname=fontname, ticks_fontsize=ticks_fontsize, grid=False, pad_for_wedge=True)
@@ -1312,10 +1332,12 @@ def _regr_split_viz(node: ShadowDecTreeNode,
         right = y_train[right]
         split = node.split()
 
-        ax.plot([overall_feature_range[0], split], [np.mean(left), np.mean(left)], '--', color=colors['split_line'],
-                linewidth=1)
+        if len(left) > 0:
+            ax.plot([overall_feature_range[0], split], [np.mean(left), np.mean(left)], '--', color=colors['split_line'],
+                    linewidth=1)
         ax.plot([split, split], [*y_range], '--', color=colors['split_line'], linewidth=1)
-        ax.plot([split, overall_feature_range[1]], [np.mean(right), np.mean(right)], '--', color=colors['split_line'],
+        if len(right) > 0:
+            ax.plot([split, overall_feature_range[1]], [np.mean(right), np.mean(right)], '--', color=colors['split_line'],
                 linewidth=1)
 
         wedge_ticks = _draw_wedge(ax, x=node.split(), node=node, color=colors['wedge'], is_classifier=False)
@@ -1359,6 +1381,7 @@ def _regr_split_viz(node: ShadowDecTreeNode,
     if filename is not None:
         plt.savefig(filename, bbox_inches='tight', pad_inches=0)
         plt.close()
+    return True
 
 
 def _regr_leaf_viz(node: ShadowDecTreeNode,
@@ -1374,6 +1397,8 @@ def _regr_leaf_viz(node: ShadowDecTreeNode,
     colors = adjust_colors(colors)
 
     samples = node.samples()
+    if len(samples) == 0:
+        return False
     y = y[samples]
 
     figsize = (.75, .8)
@@ -1404,6 +1429,7 @@ def _regr_leaf_viz(node: ShadowDecTreeNode,
     if filename is not None:
         plt.savefig(filename, bbox_inches='tight', pad_inches=0)
         plt.close()
+    return True
 
 
 def _draw_legend(shadow_tree, target_name, filename, colors, fontname):
