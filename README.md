@@ -288,13 +288,18 @@ Finally, don't use IE to view .svg files. Use Edge as they look much better. I s
 
 Make sure to follow the install guidelines above.
 
+In order to run tests, you need to install the library with the `[dev]` extra:
+```bash 
+pip install dtreeviz[dev]        # Install develop dependencies
+```
+
 To push the `dtreeviz` library to your local egg cache (force updates) during development, do this (from anaconda prompt on Windows):
  
 ```bash 
 python setup.py install -f
 ```
 
-E.g., on Terence's box, it add `/Users/parrt/anaconda3/lib/python3.6/site-packages/dtreeviz-2.2.1-py3.6.egg`.
+E.g., on Terence's box, it add `/Users/parrt/anaconda3/lib/python3.6/site-packages/dtreeviz-2.2.2-py3.6.egg`.
 
 ## Feedback
 
