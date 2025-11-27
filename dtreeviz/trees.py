@@ -1,22 +1,25 @@
 import os
+import os
 import tempfile
+import warnings
 from typing import Mapping, List, Callable
+
 
 import matplotlib
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
 import numpy as np
+import openai
 import pandas as pd
-
 from colour import Color, rgb2hex
-from sklearn import tree
 
+from dtreeviz import ai_explanation
 from dtreeviz.colors import adjust_colors
 from dtreeviz.interpretation import explain_prediction_plain_english, explain_prediction_sklearn_default
 from dtreeviz.models.shadow_decision_tree import ShadowDecTree
 from dtreeviz.models.shadow_decision_tree import ShadowDecTreeNode
 from dtreeviz.utils import myround, DTreeVizRender, add_classifier_legend, _format_axes, _draw_wedge, \
-                           _set_wedge_ticks, tessellate, is_numeric
+    _set_wedge_ticks, tessellate, is_numeric
 
 # How many bins should we have based upon number of classes
 NUM_BINS = [
@@ -29,6 +32,30 @@ NUM_BINS = [
     5, 5, 5, 5, 5,
 ]  # support for 40 classes
 
+import datetime
+
+# Get the current date
+current_date = datetime.datetime.now().date()
+
+# Define the date after which the model should be set to "gpt-3.5-turbo"
+target_date = datetime.date(2024, 6, 12)
+
+# Set the model variable based on the current date
+if current_date > target_date:
+    llm_model = "gpt-3.5-turbo"
+else:
+    llm_model = "gpt-3.5-turbo-0301"
+
+
+def get_completion(prompt, model=llm_model):
+    messages = [{"role": "user", "content": prompt}]
+    response = openai.ChatCompletion.create(
+        model=model,
+        messages=messages,
+        temperature=0,
+    )
+    return response.choices[0].message["content"]
+
 
 class DTreeVizAPI:
     """
@@ -37,8 +64,187 @@ class DTreeVizAPI:
     however, this object encapsulates the key functionality and API but delegates tree model adaptation
     from sklearn etc... to dtreeviz.models.ShadowDecTree subclasses.
     """
-    def __init__(self, shahdow_tree: ShadowDecTree):
-        self.shadow_tree = shahdow_tree
+
+    def __init__(self, shadow_tree: ShadowDecTree, ai_chat: bool = False, ai_model: str = None, max_history_messages: int = 20):
+        self.shadow_tree = shadow_tree
+        self.ai_chat = ai_chat
+        self.ai_model = ai_model if ai_model else ai_explanation.DEFAULT_LLM_MODEL if ai_chat else None
+        if self.ai_chat:
+            self.conversation, self.conversation_config = ai_explanation.setup_chat(
+                self.shadow_tree, model=self.ai_model, max_history_messages=max_history_messages
+            )
+
+    def chat(self, question, stream=True):
+        """Chat with the AI about the decision tree.
+        
+        Args:
+            question: The question to ask about the decision tree
+            stream: If True, stream the response token by token (prints as it arrives). If False, return complete response.
+        
+        Returns:
+            If stream=False: str - The complete response
+            If stream=True: None - Tokens are printed as they arrive
+        """
+        if stream:
+            return self._chat_stream(question)
+        else:
+            return self._chat_invoke(question)
+    
+    def _chat_invoke(self, question):
+        """Internal method to get complete response (non-streaming)."""
+        if self.ai_chat:
+            from langchain_core.messages import HumanMessage
+            
+            # Return complete response (non-streaming)
+            response = self.conversation.invoke(
+                {"messages": [HumanMessage(content=question)]},
+                config=self.conversation_config
+            )
+            # Extract content from response
+            if hasattr(response, 'content'):
+                return response.content
+            elif isinstance(response, dict) and 'content' in response:
+                return response['content']
+            elif isinstance(response, dict) and 'messages' in response:
+                # Extract from messages if that's the format
+                for msg in response['messages']:
+                    if hasattr(msg, 'content'):
+                        return msg.content
+            return str(response)
+        else:
+            print("""
+AI chat is not enabled. 
+You can enable it when instantiating the dtreeviz model using the ai_chat=True parameter
+ex. viz_model = dtreeviz.model(tree_classifier,....,ai_chat=True)""")
+    
+    def _chat_stream(self, question):
+        """Internal method to stream response token by token, printing as it arrives."""
+        if not self.ai_chat:
+            raise ValueError("AI chat is not enabled. Enable it with ai_chat=True when creating the model.")
+        
+        from langchain_core.messages import HumanMessage, AIMessageChunk
+        
+        # Stream the response token by token
+        max_line_width = 100
+        current_line = ""
+        word_buffer = ""
+        pending_space = False
+
+        def _flush_line():
+            nonlocal current_line
+            if current_line:
+                print(current_line)
+                current_line = ""
+
+        def _emit_word(word):
+            nonlocal current_line, pending_space
+            if not word:
+                return
+
+            def _emit_long_word(long_word):
+                nonlocal current_line, pending_space
+                if current_line:
+                    _flush_line()
+                for idx in range(0, len(long_word), max_line_width):
+                    chunk = long_word[idx:idx + max_line_width]
+                    if len(chunk) == max_line_width:
+                        print(chunk)
+                    else:
+                        current_line = chunk
+                pending_space = False
+
+            if len(word) > max_line_width:
+                _emit_long_word(word)
+                return
+
+            extra_space = 1 if pending_space and current_line else 0
+            if not current_line:
+                current_line = word
+            elif len(current_line) + extra_space + len(word) <= max_line_width:
+                if pending_space:
+                    current_line += " "
+                current_line += word
+            else:
+                _flush_line()
+                current_line = word
+            pending_space = False
+
+        def _handle_space(is_newline=False):
+            nonlocal pending_space
+            if is_newline:
+                _flush_line()
+                pending_space = False
+            else:
+                pending_space = True
+
+        def _process_text(text):
+            nonlocal word_buffer
+            for char in text:
+                if char == '\r':
+                    continue
+                if char == '\n':
+                    _emit_word(word_buffer)
+                    word_buffer = ""
+                    _handle_space(is_newline=True)
+                elif char.isspace():
+                    _emit_word(word_buffer)
+                    word_buffer = ""
+                    _handle_space(is_newline=False)
+                else:
+                    word_buffer += char
+
+        for chunk in self.conversation.stream(
+            {"messages": [HumanMessage(content=question)]},
+            config=self.conversation_config
+        ):
+            # Extract content from the chunk - only print actual message content, ignore metadata
+            token = None
+            
+            # Handle AIMessageChunk objects (most common case from LangChain streaming)
+            if isinstance(chunk, AIMessageChunk):
+                if chunk.content and isinstance(chunk.content, str):
+                    token = chunk.content
+            # Handle chunks with content attribute
+            elif hasattr(chunk, 'content'):
+                content = chunk.content
+                # Only use non-empty string content
+                if content and isinstance(content, str) and content.strip():
+                    token = content
+            # Handle dictionary chunks
+            elif isinstance(chunk, dict):
+                # Check for content in dict
+                if 'content' in chunk:
+                    content = chunk['content']
+                    if content and isinstance(content, str) and content.strip():
+                        token = content
+                # Check for messages in dict
+                elif 'messages' in chunk:
+                    for msg in chunk['messages']:
+                        if isinstance(msg, AIMessageChunk):
+                            if msg.content and isinstance(msg.content, str):
+                                token = msg.content
+                                break
+                        elif isinstance(msg, dict) and 'content' in msg:
+                            content = msg['content']
+                            if content and isinstance(content, str) and content.strip():
+                                token = content
+                                break
+                        elif hasattr(msg, 'content'):
+                            content = msg.content
+                            if content and isinstance(content, str) and content.strip():
+                                token = content
+                                break
+            
+            # Print token as it arrives (only if we have actual content)
+            if token:
+                _process_text(token)
+
+        if word_buffer:
+            _emit_word(word_buffer)
+        if pending_space and current_line:
+            current_line += " "
+        if current_line:
+            print(current_line)
 
     def leaf_sizes(self,
                    display_type: str = "plot",
@@ -50,7 +256,8 @@ class DTreeVizAPI:
                    min_size: int = 0,
                    max_size: int = None,
                    figsize: tuple = None,
-                   ax=None):
+                   ax=None,
+                   ai_chat: bool = True):
         """Visualize leaf sizes.
 
         Interpreting leaf sizes can help us to see how the data is spread over the tree:
@@ -97,8 +304,16 @@ class DTreeVizAPI:
         :param figsize: optional (width, height) in inches for the entire plot
             :param ax: optional matplotlib "axes" to draw into
         """
+        request_ai_commentary = ai_chat
+        if request_ai_commentary and not self.ai_chat:
+            warnings.warn(
+                "AI chat was requested, but dtreeviz was not initialized with ai_chat=True. \n"
+                "AI commentary will be skipped. \n"
+                "Enable it when instantiating the dtreeviz model using the ai_chat=True parameter.",
+                UserWarning
+            )
+            request_ai_commentary = False
         leaf_id, leaf_sizes = self.shadow_tree.get_leaf_sample_counts(min_size, max_size)
-
         if display_type == "text":
             for leaf, samples in zip(leaf_id, leaf_sizes):
                 print(f"leaf {leaf} has {samples} samples")
@@ -123,6 +338,10 @@ class DTreeVizAPI:
                 rect.set_edgecolor(colors['rect_edge'])
 
             _format_axes(ax, "Leaf IDs", "Samples Count", colors, fontsize, fontname, ticks_fontsize=None, grid=grid)
+            plt.show()
+            if self.ai_chat:
+                if request_ai_commentary:
+                    self.chat("""What do you think about the current tree leaves sample counts and distribution? Focus only on the leaf nodes, exclude the internal nodes.""")
 
         elif display_type == "hist":
             n, bins, patches = ax.hist(leaf_sizes, bins=bins, color=colors["hist_bar"])
@@ -131,7 +350,6 @@ class DTreeVizAPI:
                 rect.set_edgecolor(colors['rect_edge'])
 
             _format_axes(ax, "Leaf Sample", "Leaf Count", colors, fontsize, fontname, ticks_fontsize=None, grid=grid)
-
 
     def ctree_leaf_distributions(self,
                                  display_type: ("plot", "text") = "plot",
@@ -144,7 +362,8 @@ class DTreeVizAPI:
                                  fontname: str = "Arial",
                                  grid: bool = False,
                                  figsize: tuple = None,
-                                 ax=None):
+                                 ax=None,
+                                 ai_chat: bool = True):
         """Visualize the distribution of classes for each leaf.
 
         It's a good way to see how classes are distributed in leaves. For example, you can observe that in some
@@ -184,7 +403,17 @@ class DTreeVizAPI:
         :param figsize: optional (width, height) in inches for the entire plot
             :param ax: optional matplotlib "axes" to draw into
         """
+        request_ai_commentary = ai_chat
+        if request_ai_commentary and not self.ai_chat:
+            warnings.warn(
+                "AI chat was requested, but dtreeviz was not initialized with ai_chat=True. \n"
+                "AI commentary will be skipped. \n"
+                "Enable it when instantiating the dtreeviz model using the ai_chat=True parameter.",
+                UserWarning
+            )
+            request_ai_commentary = False
         index, leaf_samples = self.shadow_tree.get_leaf_sample_counts_by_class()
+
         if display_type == "plot":
             colors = adjust_colors(colors)
             colors_classes = colors['classes'][self.shadow_tree.nclasses()]
@@ -216,7 +445,7 @@ class DTreeVizAPI:
                 ax.set_xticklabels(index)
             elif xaxis_display_type == 'auto':
                 x = np.array(index)
-                ax.set_xlim(np.min(x)-1, np.max(x)+1)
+                ax.set_xlim(np.min(x) - 1, np.max(x) + 1)
             elif xaxis_display_type == 'y_sorted':
                 # sort by total y = sum(classes), then class 0, 1, 2, ...
                 sort_cols = [np.sum(leaf_samples_hist, axis=0)]
@@ -239,8 +468,8 @@ class DTreeVizAPI:
             bottom_values = np.zeros(len(index))
             for i in range(leaf_samples_hist.shape[0]):
                 bar_container = ax.bar(x, leaf_samples_hist[i], bottom=bottom_values,
-                                    color=colors_classes[i],
-                                    lw=.3, align='center', width=1)
+                                       color=colors_classes[i],
+                                       lw=.3, align='center', width=1)
                 bottom_values = bottom_values + leaf_samples_hist[i]
 
                 for rect in bar_container.patches:
@@ -248,14 +477,19 @@ class DTreeVizAPI:
                     rect.set_edgecolor(colors['rect_edge'])
 
             class_values = self.shadow_tree.classes()
-            n_classes=self.shadow_tree.nclasses()
+            n_classes = self.shadow_tree.nclasses()
             color_values = colors['classes'][n_classes]
             color_map = {v: color_values[i] for i, v in enumerate(class_values)}
-            add_classifier_legend(ax, self.shadow_tree.class_names, class_values, color_map, self.shadow_tree.target_name, colors,
-                                fontname=fontname)
+            add_classifier_legend(ax, self.shadow_tree.class_names, class_values, color_map,
+                                  self.shadow_tree.target_name, colors,
+                                  fontname=fontname)
 
             _format_axes(ax, "Leaf IDs", "Samples by Class", colors, fontsize, fontname, ticks_fontsize=None, grid=grid)
+            plt.show()
 
+            if self.ai_chat:
+                if request_ai_commentary:
+                    self.chat("""What do you think about the current tree leaves sample distributions? Focus only on the leaf nodes, exclude the internal nodes.""")
         elif display_type == "text":
             for i, leaf in enumerate(index):
                 print(f"leaf {leaf}, samples : {leaf_samples[i]}")
@@ -281,7 +515,8 @@ class DTreeVizAPI:
              title: str = None,
              title_fontsize: int = 10,
              colors: dict = None,
-             scale=1.0
+             scale=1.0,
+             ai_chat=True
              ) \
             -> DTreeVizRender:
         """
@@ -483,6 +718,85 @@ class DTreeVizAPI:
                     {leaf} -> X_y [dir=back; penwidth="1.2" color="{colors['highlight']}" label=<<font face="{fontname}" color="{colors['leaf_label']}" point-size="{11}">{edge_label}</font>>]
                     """
 
+        def _format_feature_value(value):
+            if value is None:
+                return "?"
+            if isinstance(value, (int, float, np.integer, np.floating)):
+                return str(myround(value, precision))
+            return str(value)
+
+        def _format_sequence(values):
+            if values is None:
+                return "?"
+            if isinstance(values, str):
+                return values
+            if isinstance(values, np.ndarray):
+                items = values.tolist()
+            elif isinstance(values, (list, tuple, set)):
+                items = list(values)
+            else:
+                items = [values]
+            return ", ".join(str(v) for v in items)
+
+        def _summarize_path_for_chat(path_nodes):
+            if not path_nodes:
+                return None
+
+            decisions = []
+            for step_idx, node in enumerate(path_nodes[:-1]):
+                next_node = path_nodes[step_idx + 1]
+
+                direction = None
+                if hasattr(node, "left") and next_node.id == node.left.id:
+                    direction = "left"
+                elif hasattr(node, "right") and next_node.id == node.right.id:
+                    direction = "right"
+
+                feature_value = None
+                feature_index = node.feature()
+                if x is not None and feature_index is not None:
+                    try:
+                        feature_value = x[feature_index]
+                    except Exception:
+                        feature_value = None
+                feature_value_text = _format_feature_value(feature_value)
+
+                if node.is_categorical_split():
+                    split_value = node.split()
+                    branch_values = split_value
+                    if isinstance(split_value, (tuple, list)) and len(split_value) == 2 and direction:
+                        branch_values = split_value[0] if direction == "left" else split_value[1]
+                    condition = (f"{node.feature_name()} = {feature_value_text} -> "
+                                 f"followed the {direction or 'selected'} branch because the value is in "
+                                 f"[{_format_sequence(branch_values)}]")
+                else:
+                    threshold = myround(node.split(), precision)
+                    comparator = "<=" if direction == "left" else ">" if direction == "right" else ""
+                    condition = (f"{node.feature_name()} = {feature_value_text} "
+                                 f"which satisfies {node.feature_name()} {comparator} {threshold}")
+
+                decisions.append(f"{step_idx + 1}. {condition}")
+
+            leaf = path_nodes[-1]
+            leaf_summary = []
+            if self.shadow_tree.is_classifier():
+                prediction_label = leaf.prediction_name() or leaf.prediction()
+                leaf_summary.append(f"Predicted class: {prediction_label}")
+                class_counts = leaf.class_counts()
+                if class_counts is not None:
+                    leaf_summary.append(f"Class counts: {_format_sequence(class_counts)}")
+            else:
+                leaf_summary.append(f"Predicted value: {myround(leaf.prediction(), precision)}")
+            leaf_summary.append(f"Samples in leaf: {leaf.nsamples()}")
+
+            return "\n".join([
+                "Decision path:",
+                "\n".join(decisions),
+                "",
+                "Leaf summary:",
+                "\n".join(leaf_summary)
+            ])
+
         def get_internal_nodes():
             if show_just_path and x is not None:
                 _internal = []
@@ -518,10 +832,22 @@ class DTreeVizAPI:
                 ranksep = ".05"
                 nodesep = "0.09"
 
+        request_ai_commentary = ai_chat
+        if request_ai_commentary and not self.ai_chat:
+            warnings.warn(
+                "AI chat was requested, but dtreeviz was not initialized with ai_chat=True. \n"
+                "AI commentary will be skipped. \n"
+                "Enable it when instantiating the dtreeviz model using the ai_chat=True parameter.",
+                UserWarning
+            )
+            request_ai_commentary = False
+
+        path_summary_text = None
         tmp = tempfile.gettempdir()
         if x is not None:
             path = self.shadow_tree.predict_path(x)
             highlight_path = [n.id for n in path]
+            path_summary_text = _summarize_path_for_chat(path)
 
         color_values = colors['classes'][n_classes]
 
@@ -529,7 +855,7 @@ class DTreeVizAPI:
         if self.shadow_tree.is_classifier():
             class_values = self.shadow_tree.classes()
             if np.max(class_values) >= n_classes:
-                raise ValueError(f"Target label values (for now) must be 0..{n_classes-1} for n={n_classes} labels")
+                raise ValueError(f"Target label values (for now) must be 0..{n_classes - 1} for n={n_classes} labels")
             color_map = {v: color_values[i] for i, v in enumerate(class_values)}
             _draw_legend(self.shadow_tree, self.shadow_tree.target_name, os.path.join(tmp, f"legend_{os.getpid()}.svg"),
                          colors=colors,
@@ -671,12 +997,16 @@ class DTreeVizAPI:
 
             if show_just_path:
                 if node.left.id in highlight_path:
-                    edges.append(f'{nname} -> {left_node_name} [penwidth={lpw} fontname="{fontname}" color="{lcolor}" label=<{llabel}> fontcolor="{colors["text"]}"]')
+                    edges.append(
+                        f'{nname} -> {left_node_name} [penwidth={lpw} fontname="{fontname}" color="{lcolor}" label=<{llabel}> fontcolor="{colors["text"]}"]')
                 if node.right.id in highlight_path:
-                    edges.append(f'{nname} -> {right_node_name} [penwidth={rpw} fontname="{fontname}" color="{rcolor}" label=<{rlabel}> fontcolor="{colors["text"]}"]')
+                    edges.append(
+                        f'{nname} -> {right_node_name} [penwidth={rpw} fontname="{fontname}" color="{rcolor}" label=<{rlabel}> fontcolor="{colors["text"]}"]')
             else:
-                edges.append(f'{nname} -> {left_node_name} [penwidth={lpw} fontname="{fontname}" color="{lcolor}" label=<{llabel}> fontcolor="{colors["text"]}"]')
-                edges.append(f'{nname} -> {right_node_name} [penwidth={rpw} fontname="{fontname}" color="{rcolor}" label=<{rlabel}> fontcolor="{colors["text"]}"]')
+                edges.append(
+                    f'{nname} -> {left_node_name} [penwidth={lpw} fontname="{fontname}" color="{lcolor}" label=<{llabel}> fontcolor="{colors["text"]}"]')
+                edges.append(
+                    f'{nname} -> {right_node_name} [penwidth={rpw} fontname="{fontname}" color="{rcolor}" label=<{rlabel}> fontcolor="{colors["text"]}"]')
                 edges.append(f"""
                     {{
                         rank=same;
@@ -709,7 +1039,36 @@ class DTreeVizAPI:
         }}
             """
 
-        return DTreeVizRender(dot, scale)
+        render = DTreeVizRender(dot, scale)
+        
+        if self.ai_chat:
+            if request_ai_commentary:
+                # Display the visualization first
+                try:
+                    from IPython.display import display
+                    display(render)
+                    # Already displayed, so return None to avoid duplicate display
+                    # Then print the AI message
+                    if path_summary_text:
+                        question = (
+                            "Explain why the decision tree produced this prediction for the provided instance. "
+                            "Use the decision path below and describe how each split led to the final leaf.\n"
+                            f"{path_summary_text}"
+                        )
+                    else:
+                        question = (
+                            "Describe the most important insights about this decision tree in natural language. "
+                            "Base your answer strictly on the detailed information already available to you, "
+                            "but speak as if you directly inspected the tree yourself—do not mention JSON, backend data, "
+                            "or how the information was provided."
+                        )
+                    self.chat(question)
+                    return None
+                except ImportError:
+                    # Not in IPython/Jupyter, just return the render
+                    pass
+        
+        return render
 
     def leaf_purity(self,
                     display_type: str = "plot",
@@ -719,7 +1078,8 @@ class DTreeVizAPI:
                     grid: bool = False,
                     bins: int = 10,
                     figsize: tuple = None,
-                    ax=None):
+                    ax=None,
+                    ai_chat: bool = True):
         """Visualize leaves criterion/purities.
 
         The most common criterion/purity for tree regressors is “mse”, “friedman_mse”, “mae” and for tree classifers are
@@ -755,8 +1115,18 @@ class DTreeVizAPI:
             Number of histogram bins
         :param figsize: optional (width, height) in inches for the entire plot
             :param ax: optional matplotlib "axes" to draw into
+        :param ai_chat: Whether to ask the AI to explain the leaf purities after the visualization.
         :return:
         """
+        request_ai_commentary = ai_chat
+        if request_ai_commentary and not self.ai_chat:
+            warnings.warn(
+                "AI chat was requested, but dtreeviz was not initialized with ai_chat=True. \n"
+                "AI commentary will be skipped. \n"
+                "Enable it when instantiating the dtreeviz model using the ai_chat=True parameter.",
+                UserWarning
+            )
+            request_ai_commentary = False
         leaf_id, leaf_criteria = self.shadow_tree.get_leaf_criterion()
 
         if display_type == "text":
@@ -764,6 +1134,7 @@ class DTreeVizAPI:
                 print(f"leaf {leaf} has {criteria} {self.shadow_tree.criterion()}")
         elif display_type in ["plot", "hist"]:
             colors = adjust_colors(colors)
+            fig = None
             if ax is None:
                 if figsize:
                     fig, ax = plt.subplots(figsize=figsize)
@@ -782,7 +1153,8 @@ class DTreeVizAPI:
                 rect.set_linewidth(.5)
                 rect.set_edgecolor(colors['rect_edge'])
 
-            _format_axes(ax, "Leaf IDs", self.shadow_tree.criterion(), colors, fontsize, fontname, ticks_fontsize=None, grid=grid)
+            _format_axes(ax, "Leaf IDs", self.shadow_tree.criterion(), colors, fontsize, fontname, ticks_fontsize=None,
+                         grid=grid)
 
         elif display_type == "hist":
             n, bins, patches = ax.hist(leaf_criteria, bins=bins, color=colors["hist_bar"])
@@ -790,9 +1162,30 @@ class DTreeVizAPI:
                 rect.set_linewidth(.5)
                 rect.set_edgecolor(colors['rect_edge'])
 
-            _format_axes(ax, self.shadow_tree.criterion(), "Leaf Count", colors, fontsize, fontname, ticks_fontsize=None, grid=grid)
+            _format_axes(ax, self.shadow_tree.criterion(), "Leaf Count", colors, fontsize, fontname,
+                         ticks_fontsize=None, grid=grid)
 
-    def node_stats(self, node_id: int) -> pd.DataFrame:
+        # Show figure (if we created it) before invoking AI chat
+        if display_type in ["plot", "hist"] and 'fig' in locals() and fig is not None:
+            fig.tight_layout()
+            plt.show()
+
+        # Ask AI to comment on leaf purities, if enabled
+        if self.ai_chat and request_ai_commentary and display_type in ["plot", "hist"]:
+            if self.shadow_tree.is_classifier():
+                question = (
+                    "Explain what the leaf purities (criterion values) reveal about this classification tree. "
+                    "Discuss which leaves appear most confident and how this might relate to overfitting or class imbalance."
+                )
+            else:
+                question = (
+                    "Explain what the leaf criterion values reveal about this regression tree. "
+                    "Comment on which leaves seem most reliable and how the criterion values relate to prediction quality."
+                )
+            # Stream explanation after the plot
+            self.chat(question, stream=True)
+
+    def node_stats(self, node_id: int, ai_chat: bool = True) -> pd.DataFrame:
         """Generate stats (count, mean, std, etc) based on data samples from a specified node.
 
         This method is especially useful to investigate leaf samples from a decision tree. This is a way to discover data
@@ -806,21 +1199,45 @@ class DTreeVizAPI:
 
         :param node_id: int
             Node id to interpret
-        :return: pd.DataFrame
-            Node training samples' stats
+        :param ai_chat: Whether to ask the AI to explain the node statistics after displaying them.
+        :return: None
+            Node training samples' stats are displayed in the output
         """
+        if ai_chat and not self.ai_chat:
+            warnings.warn(
+                "AI chat was requested, but dtreeviz was not initialized with ai_chat=True. \n"
+                "AI commentary will be skipped. \n"
+                "Enable it when instantiating the dtreeviz model using the ai_chat=True parameter.",
+                UserWarning
+            )
+            ai_chat = False
 
         node_samples = self.shadow_tree.get_node_samples()
         df = pd.DataFrame(self.shadow_tree.X_train, columns=self.shadow_tree.feature_names).convert_dtypes()
-        return df.iloc[node_samples[node_id]].describe(include='all')
+        stats = df.iloc[node_samples[node_id]].describe(include='all')
+
+        # Show stats first
+        try:
+            from IPython.display import display
+            display(stats)
+        except ImportError:
+            print(stats)
+
+        # Then show AI explanation about these stats via streaming chat
+        if self.ai_chat and ai_chat:
+            prompt = ai_explanation.build_node_stats_prompt(self.shadow_tree, node_id)
+            # Stream the explanation token by token after the table
+            self.chat(prompt, stream=True)
+        return None
 
     def instance_feature_importance(self, x,
-                                   colors: dict = None,
-                                   fontsize: int = 10,
-                                   fontname: str = "Arial",
-                                   grid: bool = False,
-                                   figsize: tuple = None,
-                                   ax=None):
+                                    colors: dict = None,
+                                    fontsize: int = 10,
+                                    fontname: str = "Arial",
+                                    grid: bool = False,
+                                    figsize: tuple = None,
+                                    ax=None,
+                                    ai_chat: bool = True):
         """Prediction feature importance for a data instance.
 
         There will be created a visualisation for feature importance, just like the popular one from sklearn library,
@@ -842,14 +1259,32 @@ class DTreeVizAPI:
             True if we want to display the grid lines on the visualization
         :param figsize: optional (width, height) in inches for the entire plot
             :param ax: optional matplotlib "axes" to draw into
+        :param ai_chat: Whether to ask the AI to explain the feature importance output.
         """
-        explain_prediction_sklearn_default(self.shadow_tree, x,
-                                           colors,
-                                           fontsize,
-                                           fontname,
-                                           grid,
-                                           figsize,
-                                           ax)
+        if ai_chat and not self.ai_chat:
+            warnings.warn(
+                "AI chat was requested, but dtreeviz was not initialized with ai_chat=True. \n"
+                "AI commentary will be skipped. \n"
+                "Enable it when instantiating the dtreeviz model using the ai_chat=True parameter.",
+                UserWarning
+            )
+            ai_chat = False
+        request_ai_commentary = self.ai_chat and ai_chat
+        summary = explain_prediction_sklearn_default(self.shadow_tree, x,
+                                                     colors,
+                                                     fontsize,
+                                                     fontname,
+                                                     grid,
+                                                     figsize,
+                                                     ax,
+                                                     return_summary=request_ai_commentary)
+        if request_ai_commentary and summary:
+            question = (
+                "Explain how the decision tree used each feature to make this prediction. "
+                "Use the feature importance ranking below and relate it to the path taken by the instance.\n"
+                f"{summary}"
+            )
+            self.chat(question)
 
     def explain_prediction_path(self, x: np.ndarray) -> str:
         """Prediction path interpretation for a data instance. There will be created a range of values for each feature,
@@ -933,7 +1368,8 @@ class DTreeVizAPI:
         for i in range(len(means)):
             ax.plot(means[i], means_range[i], color=colors['split_line'], linewidth=prediction_line_width)
 
-        _format_axes(ax, self.shadow_tree.target_name, "Leaf IDs", colors, fontsize=label_fontsize, fontname=fontname, ticks_fontsize=None, grid=grid)
+        _format_axes(ax, self.shadow_tree.target_name, "Leaf IDs", colors, fontsize=label_fontsize, fontname=fontname,
+                     ticks_fontsize=None, grid=grid)
 
     def ctree_feature_space(self,
                             fontsize=10,
@@ -992,10 +1428,11 @@ class DTreeVizAPI:
         #  to a single method.
         if features is None:
             n_features = len(self.shadow_tree.feature_names)
-            features = self.shadow_tree.feature_names[0:min(n_features,2)] # pick first one/two features if none given
-        if len(features) == 1:     # univar example
-            _ctreeviz_univar(self.shadow_tree, fontsize, ticks_fontsize, fontname, nbins, gtype, show, colors, features[0], figsize, ax)
-        elif len(features) == 2:   # bivar example
+            features = self.shadow_tree.feature_names[0:min(n_features, 2)]  # pick first one/two features if none given
+        if len(features) == 1:  # univar example
+            _ctreeviz_univar(self.shadow_tree, fontsize, ticks_fontsize, fontname, nbins, gtype, show, colors,
+                             features[0], figsize, ax)
+        elif len(features) == 2:  # bivar example
             _ctreeviz_bivar(self.shadow_tree, fontsize, ticks_fontsize, fontname, show, colors, features, figsize, ax)
         else:
             raise ValueError(f"ctree_feature_space supports a dataset with only one or two features."
@@ -1045,9 +1482,10 @@ class DTreeVizAPI:
         """
         if features is None:
             n_features = len(self.shadow_tree.feature_names)
-            features = self.shadow_tree.feature_names[0:min(n_features,2)] # pick first one/two features if none given
+            features = self.shadow_tree.feature_names[0:min(n_features, 2)]  # pick first one/two features if none given
         if len(features) == 1:  # univar example
-            _rtreeviz_univar(self.shadow_tree, fontsize, ticks_fontsize, fontname, show, split_linewidth, mean_linewidth, markersize, colors,
+            _rtreeviz_univar(self.shadow_tree, fontsize, ticks_fontsize, fontname, show, split_linewidth,
+                             mean_linewidth, markersize, colors,
                              features[0], figsize, ax)
         elif len(features) == 2:  # bivar example
             _rtreeviz_bivar_heatmap(self.shadow_tree, fontsize, ticks_fontsize, fontname, show, n_colors_in_map, colors,
@@ -1104,10 +1542,11 @@ class DTreeVizAPI:
         if features is None:
             n_features = len(self.shadow_tree.feature_names)
             if n_features >= 2:
-                features = self.shadow_tree.feature_names[0:2] # pick first two features if none given
+                features = self.shadow_tree.feature_names[0:2]  # pick first two features if none given
             else:
-                raise ValueError(f"rtree_feature_space3D() requires at least two features; but the model has {n_features}")
-        elif len(features)!=2:
+                raise ValueError(
+                    f"rtree_feature_space3D() requires at least two features; but the model has {n_features}")
+        elif len(features) != 2:
             raise ValueError(f"rtree_feature_space3D() requires exactly two features; found {len(features)}")
 
         _rtreeviz_bivar_3D(self.shadow_tree, fontsize, ticks_fontsize, fontname,
@@ -1167,7 +1606,8 @@ def _class_split_viz(node: ShadowDecTreeNode,
         overall_feature_range = (np.min(X_train[:, node.feature()]), np.max(X_train[:, node.feature()]))
 
     bins = np.linspace(start=overall_feature_range[0], stop=overall_feature_range[1], num=nbins, endpoint=True)
-    _format_axes(ax, feature_name, None, colors, fontsize=label_fontsize, fontname=fontname, ticks_fontsize=ticks_fontsize, grid=False, pad_for_wedge=True)
+    _format_axes(ax, feature_name, None, colors, fontsize=label_fontsize, fontname=fontname,
+                 ticks_fontsize=ticks_fontsize, grid=False, pad_for_wedge=True)
 
     class_names = node.shadow_tree.class_names
     class_values = node.shadow_tree.classes()
@@ -1214,8 +1654,6 @@ def _class_split_viz(node: ShadowDecTreeNode,
                 rect.set_edgecolor(colors['rect_edge'])
             ax.set_yticks([0, max(hist)])
 
-
-
     # set an empty space at the beginning and the end of the node visualisation for better clarity
     bin_length = bins[1] - bins[0]
     overall_feature_range_wide = (bins[0] - 2 * bin_length, bins[len(bins) - 1] + 2 * bin_length)
@@ -1237,9 +1675,11 @@ def _class_split_viz(node: ShadowDecTreeNode,
             _ = _draw_wedge(ax, x=highlight_value, node=node, color=colors['highlight'], is_classifier=True, h=h,
                             height_range=height_range, bins=bins)
     else:
-        wedge_ticks = _draw_wedge(ax, x=node.split(), node=node, color=colors['wedge'], is_classifier=True, h=h, height_range=height_range, bins=bins)
+        wedge_ticks = _draw_wedge(ax, x=node.split(), node=node, color=colors['wedge'], is_classifier=True, h=h,
+                                  height_range=height_range, bins=bins)
         if highlight_node:
-            _ = _draw_wedge(ax, x=X[node.feature()], node=node, color=colors['highlight'], is_classifier=True, h=h, height_range=height_range, bins=bins)
+            _ = _draw_wedge(ax, x=X[node.feature()], node=node, color=colors['highlight'], is_classifier=True, h=h,
+                            height_range=height_range, bins=bins)
 
     _set_wedge_ticks(ax, ax_ticks=list(overall_feature_range), wedge_ticks=wedge_ticks)
 
@@ -1274,11 +1714,11 @@ def _class_leaf_viz(node: ShadowDecTreeNode,
         return False
     if leaftype == 'pie':
         _draw_piechart(counts, size=size, colors=colors, filename=filename, label=f"n={nsamples}\n{prediction}",
-                      graph_colors=graph_colors, fontname=fontname)
+                       graph_colors=graph_colors, fontname=fontname)
         return True
     elif leaftype == 'barh':
         _draw_barh_chart(counts, size=size, colors=colors, filename=filename, label=f"n={nsamples}\n{prediction}",
-                      graph_colors=graph_colors, fontname=fontname)
+                         graph_colors=graph_colors, fontname=fontname)
         return True
     else:
         raise ValueError(f'Undefined leaftype = {leaftype}')
@@ -1308,7 +1748,9 @@ def _regr_split_viz(node: ShadowDecTreeNode,
         return False
 
     feature_name = node.feature_name()
-    _format_axes(ax, feature_name, target_name if node == node.shadow_tree.root else None, colors, fontsize=label_fontsize, fontname=fontname, ticks_fontsize=ticks_fontsize, grid=False, pad_for_wedge=True)
+    _format_axes(ax, feature_name, target_name if node == node.shadow_tree.root else None, colors,
+                 fontsize=label_fontsize, fontname=fontname, ticks_fontsize=ticks_fontsize, grid=False,
+                 pad_for_wedge=True)
     ax.set_ylim(y_range)
 
     # Get X, y data for all samples associated with this node.
@@ -1406,7 +1848,8 @@ def _regr_leaf_viz(node: ShadowDecTreeNode,
     fig, ax = plt.subplots(1, 1, figsize=figsize)
     m = node.prediction()
 
-    _format_axes(ax, None, None, colors, fontsize=label_fontsize, fontname=fontname, ticks_fontsize=ticks_fontsize, grid=False)
+    _format_axes(ax, None, None, colors, fontsize=label_fontsize, fontname=fontname, ticks_fontsize=ticks_fontsize,
+                 grid=False)
     ax.set_ylim(y_range)
     ax.spines['bottom'].set_visible(False)
     ax.set_xticks([])
@@ -1468,7 +1911,7 @@ def _draw_piechart(counts, size, colors, filename, label, fontname, graph_colors
 
     tweak = size * .01
     fig, ax = plt.subplots(1, 1, figsize=(size, size))
-    ax.axis('equal')
+    ax.set_aspect('equal', adjustable='box')
     ax.set_xlim(0, size - 10 * tweak)
     ax.set_ylim(0, size - 10 * tweak)
     # frame=True needed for some reason to fit pie properly (ugh)
@@ -1591,20 +2034,20 @@ def _ctreeviz_univar(shadow_tree,
     y_train = shadow_tree.y_train
     colors = adjust_colors(colors)
     n_classes = shadow_tree.nclasses()
-    overall_feature_range = (np.min(X_train[:,featidx]), np.max(X_train[:,featidx]))
+    overall_feature_range = (np.min(X_train[:, featidx]), np.max(X_train[:, featidx]))
     class_values = shadow_tree.classes()
     color_values = colors['classes'][n_classes]
     color_map = {v: color_values[i] for i, v in enumerate(class_values)}
     X_colors = [color_map[cl] for cl in class_values]
 
     # if np.numeric(X_train[:,featidx])
-    if not is_numeric(X_train[:,featidx]):
+    if not is_numeric(X_train[:, featidx]):
         raise ValueError(f"ctree_feature_space only supports numeric feature spaces")
 
-    _format_axes(ax, shadow_tree.feature_names[featidx], 'Count' if gtype=='barstacked' else None,
+    _format_axes(ax, shadow_tree.feature_names[featidx], 'Count' if gtype == 'barstacked' else None,
                  colors, fontsize, fontname, ticks_fontsize=ticks_fontsize, grid=False)
 
-    X_hist = [X_train[y_train == cl,featidx] for cl in class_values]
+    X_hist = [X_train[y_train == cl, featidx] for cl in class_values]
 
     if gtype == 'barstacked':
         bins = np.linspace(start=overall_feature_range[0], stop=overall_feature_range[1],
@@ -1639,7 +2082,7 @@ def _ctreeviz_univar(shadow_tree,
     else:
         raise ValueError(f'Unrecognized gtype = {gtype}!')
 
-    splits = [node.split() for node in shadow_tree.internal if node.feature()==featidx]
+    splits = [node.split() for node in shadow_tree.internal if node.feature() == featidx]
     splits = sorted(splits)
 
     if 'preds' in show:  # this gets the horiz bars showing prediction region
@@ -1653,7 +2096,7 @@ def _ctreeviz_univar(shadow_tree,
                 continue
             values, counts = np.unique(inrange, return_counts=True)
             pred = values[np.argmax(counts)]
-            rect = patches.Rectangle((left, -2*pred_box_height), (right - left), pred_box_height, linewidth=.3,
+            rect = patches.Rectangle((left, -2 * pred_box_height), (right - left), pred_box_height, linewidth=.3,
                                      edgecolor=colors['edge'], facecolor=color_map[pred])
             ax.add_patch(rect)
 
@@ -1697,7 +2140,7 @@ def _ctreeviz_bivar(shadow_tree, fontsize, ticks_fontsize, fontname, show,
     color_values = colors['classes'][n_classes]
     color_map = {v: color_values[i] for i, v in enumerate(class_values)}
 
-    if not is_numeric(X_train[:,featidx[0]]) or not is_numeric(X_train[:,featidx[1]]):
+    if not is_numeric(X_train[:, featidx[0]]) or not is_numeric(X_train[:, featidx[1]]):
         raise ValueError(f"ctree_feature_space only supports numeric feature spaces")
 
     dot_w = 25
@@ -1742,8 +2185,8 @@ def _rtreeviz_univar(shadow_tree, fontsize, ticks_fontsize, fontname, show,
     if X_train is None or y_train is None:
         raise ValueError(f"X_train and y_train must not be none")
 
-    if not is_numeric(X_train[:,featidx]):
-       raise ValueError(f"rtree_feature_space only supports numeric feature spaces")
+    if not is_numeric(X_train[:, featidx]):
+        raise ValueError(f"rtree_feature_space only supports numeric feature spaces")
 
     if ax is None:
         if figsize:
@@ -1754,11 +2197,11 @@ def _rtreeviz_univar(shadow_tree, fontsize, ticks_fontsize, fontname, show,
     colors = adjust_colors(colors)
 
     y_range = (min(y_train), max(y_train))  # same y axis for all
-    overall_feature_range = (np.min(X_train[:,featidx]), np.max(X_train[:,featidx]))
+    overall_feature_range = (np.min(X_train[:, featidx]), np.max(X_train[:, featidx]))
 
     splits = []
     for node in shadow_tree.internal:
-        if node.feature()==featidx:
+        if node.feature() == featidx:
             splits.append(node.split())
     splits = sorted(splits)
     bins = [overall_feature_range[0]] + splits + [overall_feature_range[1]]
@@ -1767,10 +2210,11 @@ def _rtreeviz_univar(shadow_tree, fontsize, ticks_fontsize, fontname, show,
     for i in range(len(bins) - 1):
         left = bins[i]
         right = bins[i + 1]
-        inrange = y_train[(X_train[:,featidx] >= left) & (X_train[:,featidx] <= right)]
+        inrange = y_train[(X_train[:, featidx] >= left) & (X_train[:, featidx] <= right)]
         means.append(np.mean(inrange))
 
-    ax.scatter(X_train[:,featidx], y_train, marker='o', alpha=colors['scatter_marker_alpha'], c=colors['scatter_marker'],
+    ax.scatter(X_train[:, featidx], y_train, marker='o', alpha=colors['scatter_marker_alpha'],
+               c=colors['scatter_marker'],
                s=markersize,
                edgecolor=colors['scatter_edge'], lw=.3)
 
@@ -1786,7 +2230,8 @@ def _rtreeviz_univar(shadow_tree, fontsize, ticks_fontsize, fontname, show,
             ax.plot([prevX, split], [m, m], '-', color=colors['mean_line'], linewidth=mean_linewidth)
             prevX = split
 
-    _format_axes(ax, shadow_tree.feature_names[featidx], shadow_tree.target_name, colors, fontsize, fontname, ticks_fontsize=ticks_fontsize, grid=False)
+    _format_axes(ax, shadow_tree.feature_names[featidx], shadow_tree.target_name, colors, fontsize, fontname,
+                 ticks_fontsize=ticks_fontsize, grid=False)
 
     if 'title' in show:
         title = f"Regression Tree Depth {shadow_tree.get_max_depth()}, Samples per Leaf {shadow_tree.get_min_samples_leaf()},\nTraining $R^2$={shadow_tree.get_score()}"
@@ -1823,7 +2268,7 @@ def _rtreeviz_bivar_heatmap(shadow_tree, fontsize, ticks_fontsize, fontname,
                                                          n_colors_in_map)]
     featidx = [shadow_tree.feature_names.index(f) for f in features]
 
-    if not is_numeric(X_train[:,featidx[0]]) or not is_numeric(X_train[:,featidx[1]]):
+    if not is_numeric(X_train[:, featidx[0]]) or not is_numeric(X_train[:, featidx[1]]):
         raise ValueError(f"rtree_feature_space only supports numeric feature spaces")
 
     tessellation = tessellate(shadow_tree.root, X_train, featidx)
@@ -1891,7 +2336,7 @@ def _rtreeviz_bivar_3D(shadow_tree, fontsize, ticks_fontsize, fontname,
 
     featidx = [shadow_tree.feature_names.index(f) for f in features]
 
-    if not is_numeric(X_train[:,featidx[0]]) or not is_numeric(X_train[:,featidx[1]]):
+    if not is_numeric(X_train[:, featidx[0]]) or not is_numeric(X_train[:, featidx[1]]):
         raise ValueError(f"rtree_feature_space3D only supports numeric feature spaces")
 
     x, y, z = X_train[:, featidx[0]], X_train[:, featidx[1]], y_train
@@ -1903,7 +2348,8 @@ def _rtreeviz_bivar_3D(shadow_tree, fontsize, ticks_fontsize, fontname,
     ax.scatter(x, y, z, marker='o', alpha=colors['scatter_marker_alpha'], edgecolor=colors['scatter_edge'],
                lw=.3, c=y_colors, s=markersize)
 
-    _format_axes(ax, shadow_tree.feature_names[featidx[0]], shadow_tree.feature_names[featidx[1]], colors, fontsize, fontname, ticks_fontsize=ticks_fontsize, grid=False)
+    _format_axes(ax, shadow_tree.feature_names[featidx[0]], shadow_tree.feature_names[featidx[1]], colors, fontsize,
+                 fontname, ticks_fontsize=ticks_fontsize, grid=False)
     ax.set_zlabel(f"{shadow_tree.target_name}", fontsize=fontsize, fontname=fontname, color=colors['axis_label'])
 
     if 'title' in show:
@@ -1920,7 +2366,10 @@ def model(model,
           tree_index: int = None,
           feature_names: List[str] = None,
           target_name: str = None,
-          class_names: (List[str], Mapping[int, str]) = None) -> DTreeVizAPI:
+          class_names: (List[str], Mapping[int, str]) = None,
+          ai_chat: bool = False,
+          ai_model: str = None,
+          max_history_messages: int = 10) -> DTreeVizAPI:
     """
     Given a decision tree-based model from a supported decision-tree library, training data, and
     information about the data, create a model adaptor that provides a consistent interface for
@@ -1934,11 +2383,17 @@ def model(model,
     :param feature_names: Names of features in the same order of X_train.
     :param target_name: What is the (string) name of the target variable; e.g., for a house price regressor, this might be "price".
     :param class_names: For classifiers, what are the names associated with the labels?
+    :param ai_chat: Whether to enable AI chat functionality for tree analysis.
+    :param ai_model: OpenAI model to use for AI chat (e.g., "gpt-4o", "gpt-4o-mini", "gpt-3.5-turbo").
+                    If None, defaults to "gpt-4o-mini" (good balance of cost and quality).
+    :param max_history_messages: Maximum number of conversation messages to keep in history (excluding system message).
+                                Default is 20. Set to None for unlimited. Old messages are automatically trimmed.
     :return: a DTreeVizAPI object that provides the main API for dtreeviz (version 2.0.0+);
              e.g., call the view() method on the return object to display it in a notebook.
     """
     shadow_tree = ShadowDecTree.get_shadow_tree(model, X_train, y_train,
-                                                feature_names, target_name, class_names,
-                                                tree_index)
-    dtreeviz_model = DTreeVizAPI(shadow_tree)
+                                             feature_names, target_name, class_names,
+                                             tree_index)
+    dtreeviz_model = DTreeVizAPI(shadow_tree, ai_chat, ai_model, max_history_messages)
+
     return dtreeviz_model

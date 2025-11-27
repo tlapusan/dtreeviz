@@ -98,7 +98,8 @@ def explain_prediction_sklearn_default(shadow_tree: ShadowDecTree,
                                        fontname: str = "Arial",
                                        grid: bool = False,
                                        figsize: tuple = None,
-                                       ax=None):
+                                       ax=None,
+                                       return_summary: bool = False):
     """
     Explain prediction calculating features importance using sklearn default algorithm : mean decrease in impurity
     (or gini importance) mechanism.
@@ -125,6 +126,7 @@ def explain_prediction_sklearn_default(shadow_tree: ShadowDecTree,
     feature_path_importance = shadow_tree.get_feature_path_importance(decision_node_path)
 
     colors = adjust_colors(colors)
+    fig = None
     if ax is None:
         if figsize:
             fig, ax = plt.subplots(figsize=figsize)
@@ -147,3 +149,24 @@ def explain_prediction_sklearn_default(shadow_tree: ShadowDecTree,
         rect.set_edgecolor(colors['rect_edge'])
 
     _format_axes(ax, "Feature Importance", "Features", colors, fontsize, fontname, grid=grid)
+    if fig is not None:
+        fig.tight_layout()
+        plt.show()
+
+    if return_summary:
+        ranked_df = df.sort_values('imp', ascending=False)
+        top_features = ranked_df.head(5)
+        summary_lines = []
+        if not top_features.empty:
+            summary_lines.append("Top contributing features (importance):")
+            for idx, row in enumerate(top_features.itertuples(index=False), start=1):
+                summary_lines.append(f"{idx}. {row.features}: {row.imp:.4f}")
+        zero_features = ranked_df[ranked_df['imp'] == 0]['features'].tolist()
+        if zero_features:
+            zero_list = ", ".join(zero_features[:5])
+            more = len(zero_features) - 5
+            suffix = f", and {more} more" if more > 0 else ""
+            summary_lines.append(f"No contribution from: {zero_list}{suffix}")
+        if not summary_lines:
+            summary_lines.append("All features have zero importance for this instance.")
+        return "\n".join(summary_lines)

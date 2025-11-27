@@ -10,6 +10,7 @@ extra_xgboost = ['xgboost']
 extra_pyspark = ['pyspark']
 extra_lightgbm = ['lightgbm']
 extra_tensorflow = ['tensorflow_decision_forests']
+extra_ai = ['langchain', 'langchain-openai', 'openai', 'python-dotenv']
 
 
 setup(
@@ -31,7 +32,8 @@ setup(
         'pyspark': extra_pyspark,
         'lightgbm': extra_lightgbm,
         'tensorflow_decision_forests': extra_tensorflow,
-        'all': extra_xgboost + extra_pyspark + extra_lightgbm + extra_tensorflow,
+        'ai': extra_ai,
+        'all': extra_xgboost + extra_pyspark + extra_lightgbm + extra_tensorflow + extra_ai,
         'dev': ['pytest']
     },
     python_requires='>=3.6',
