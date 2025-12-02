@@ -4,7 +4,6 @@ import os
 
 import numpy as np
 import pandas as pd
-from dotenv import load_dotenv, find_dotenv
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables.history import RunnableWithMessageHistory
@@ -14,7 +13,6 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from dtreeviz.models.shadow_decision_tree import ShadowDecTree
 from dtreeviz.models.sklearn_decision_trees import ShadowSKDTree
 
-_ = load_dotenv(find_dotenv())  # read local .env file
 
 DEFAULT_LLM_MODEL = "gpt-4.1-mini"
 
@@ -33,7 +31,7 @@ leaf_template_string = """You are an expert in decision tree models. You have ve
                     """
 
 node_stats_template_string = """
-    Bellow I will provide you, in json format, some basic statistics for numeric and string columns in a json format delimited by '''.
+    Below I will provide you, in json format, some basic statistics for numeric and string columns in a json format delimited by '''.
     Those statistics are for the node samples and for the training set samples.
     I will also provide you the distribution of class labels for that specific node as follow : {target_stats}
     Start with a very short description of the node class labels.

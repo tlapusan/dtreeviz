@@ -10,7 +10,7 @@ extra_xgboost = ['xgboost']
 extra_pyspark = ['pyspark']
 extra_lightgbm = ['lightgbm']
 extra_tensorflow = ['tensorflow_decision_forests']
-extra_ai = ['langchain', 'langchain-openai', 'openai', 'python-dotenv']
+extra_ai = ['langchain-openai']
 
 
 setup(
