@@ -97,6 +97,7 @@ See [Installation instructions](README.md#Installation) then take a look at the 
 * [XGBoost-based examples](notebooks/dtreeviz_xgboost_visualisations.ipynb) ([colab](https://colab.research.google.com/github/parrt/dtreeviz/blob/master/notebooks/dtreeviz_xgboost_visualisations.ipynb))
 * [Classifier decision boundaries for any scikit-learn model.ipynb](https://github.com/parrt/dtreeviz/tree/master/notebooks/classifier-decision-boundaries.ipynb) ([colab](https://colab.research.google.com/github/parrt/dtreeviz/blob/master/notebooks/classifier-decision-boundaries.ipynb))
 * [Changing colors notebook](notebooks/colors.ipynb) ([colab](https://colab.research.google.com/github/parrt/dtreeviz/blob/master/notebooks/colors.ipynb))
+* [AI-powered tree analysis (sklearn)](notebooks/dtreeviz_sklearn_AI_visualisations.ipynb) - Interactive chat and explanations using LLMs
 
 To interopt with these different libraries, dtreeviz uses an adaptor object, obtained from function `dtreeviz.model()`, to extract model information necessary for visualization. Given such an adaptor object, all of the dtreeviz functionality is available to you using the same programmer interface. The basic dtreeviz usage recipe is:
 
@@ -142,6 +143,33 @@ In a notebook, you can render inline without calling `show()`. Just call `view()
 viz_model.view()       # in notebook, displays inline
 ```
 
+### AI-Powered Tree Analysis
+
+With AI integration enabled, you can ask ad hoc questions about your decision tree model using the `chat()` method. The AI has access to comprehensive knowledge about your tree structure, nodes, and training data, enabling it to answer questions about:
+
+* **Tree structure**: Overall architecture, depth, node count, splitting criteria, and tree type (classification/regression)
+* **Tree nodes**: Split conditions, feature usage, node statistics, sample distributions, and purity measures at internal nodes
+* **Leaf nodes**: Predictions, confidence scores, sample counts, and class distributions
+* **Training dataset**: Feature statistics, target distributions, and data characteristics within nodes or leaves
+
+```python
+# Enable AI chat when creating the model
+viz_model = dtreeviz.model(tree_classifier,
+                           X_train=dataset[features], y_train=dataset[target],
+                           feature_names=features,
+                           target_name=target, class_names=["perish", "survive"],
+                           ai_chat=True,
+                           ai_model="gpt-4.1-mini",
+                           max_history_messages=10)
+
+# Ask questions about your tree
+viz_model.chat("Please give me a short summary of the tree structure?")
+viz_model.chat("Which leaf nodes have the lowest prediction confidence?")
+```
+
+Additionally, when `ai_chat=True` is enabled, the main visualization methods (like `view()`) will automatically include an LLM-generated explanation alongside the visual output, providing both graphical and natural language interpretations of your decision tree.
+
+Requires `pip install dtreeviz[ai]` and an OpenAI API key set as `OPENAI_API_KEY` environment variable. See the [AI-powered tree analysis notebook](notebooks/dtreeviz_sklearn_AI_visualisations.ipynb) for more examples.
 
 ## Installation
 
@@ -162,6 +190,7 @@ pip install dtreeviz[xgboost]    # install XGBoost related dependency
 pip install dtreeviz[pyspark]    # install pyspark related dependency
 pip install dtreeviz[lightgbm]   # install LightGBM related dependency
 pip install dtreeviz[tensorflow_decision_forests]   # install tensorflow_decision_forests related dependency
+pip install dtreeviz[ai]         # install AI chat/explanation features (requires OpenAI API key)
 pip install dtreeviz[all]        # install all related dependencies
 ```
 
