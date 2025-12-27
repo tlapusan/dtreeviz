@@ -1,5 +1,4 @@
 import os
-import os
 import tempfile
 import warnings
 from typing import Mapping, List, Callable
@@ -9,11 +8,9 @@ import matplotlib
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
 import numpy as np
-import openai
 import pandas as pd
 from colour import Color, rgb2hex
 
-from dtreeviz import ai_explanation
 from dtreeviz.colors import adjust_colors
 from dtreeviz.interpretation import explain_prediction_plain_english, explain_prediction_sklearn_default
 from dtreeviz.models.shadow_decision_tree import ShadowDecTree
@@ -44,11 +41,29 @@ class DTreeVizAPI:
     def __init__(self, shadow_tree: ShadowDecTree, ai_chat: bool = False, ai_model: str = None, max_history_messages: int = 20):
         self.shadow_tree = shadow_tree
         self.ai_chat = ai_chat
-        self.ai_model = ai_model if ai_model else ai_explanation.DEFAULT_LLM_MODEL if ai_chat else None
         if self.ai_chat:
+            ai_explanation = self._require_ai_explanation()
+            self.ai_model = ai_model if ai_model else ai_explanation.DEFAULT_LLM_MODEL
             self.conversation, self.conversation_config = ai_explanation.setup_chat(
                 self.shadow_tree, model=self.ai_model, max_history_messages=max_history_messages
             )
+        else:
+            self.ai_model = ai_model if ai_model else None
+
+    @staticmethod
+    def _require_ai_explanation():
+        """
+        Import AI functionality on-demand so that `pip install dtreeviz` works without the `ai` extra.
+        """
+        try:
+            from dtreeviz import ai_explanation  # optional dependency
+            return ai_explanation
+        except Exception as e:
+            raise ModuleNotFoundError(
+                "AI functionality requires optional dependencies.\n"
+                "Install with: pip install 'dtreeviz[ai]'\n"
+                "Then configure your provider (e.g., export OPENAI_API_KEY=...)."
+            ) from e
 
     def chat(self, question, stream=True):
         """Chat with the AI about the decision tree.
@@ -1201,6 +1216,7 @@ ex. viz_model = dtreeviz.model(tree_classifier,....,ai_chat=True)""")
 
         # Then show AI explanation about these stats via streaming chat
         if self.ai_chat and ai_chat:
+            ai_explanation = self._require_ai_explanation()
             prompt = ai_explanation.build_node_stats_prompt(self.shadow_tree, node_id)
             # Stream the explanation token by token after the table
             self.chat(prompt, stream=True)

@@ -328,7 +328,7 @@ To push the `dtreeviz` library to your local egg cache (force updates) during de
 python setup.py install -f
 ```
 
-E.g., on Terence's box, it add `/Users/parrt/anaconda3/lib/python3.6/site-packages/dtreeviz-2.2.2-py3.6.egg`.
+E.g., on Terence's box, it adds `/Users/parrt/anaconda3/lib/python3.6/site-packages/dtreeviz-2.3-py3.6.egg`.
 
 ## Feedback
 
