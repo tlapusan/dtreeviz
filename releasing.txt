@@ -1,6 +1,6 @@
 # Releasing dtreeviz
 
-1. Update version.py, setup.py, README.
+1. Update dtreeviz/version.py, setup.py, README, releasing.txt.
 2. Merge dev into master
 3. Create release notes
 4. Push to pypi
